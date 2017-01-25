@@ -1,0 +1,322 @@
+---
+title: "Badanie wpływu czynników zewnętrznych na zmianę długości śledzia oceanicznego"
+author: "Arkadiusz Jachnik"
+date: "22 01 2017"
+output:
+  html_document:
+    depth: 3
+    highlight: tango
+    number_sections: no
+    theme: paper
+    toc: yes
+  pdf_document:
+    toc: yes
+    
+abstract: W raporcie przedstawiono wyniki analizy danych, dotyczących wpływu czynników
+  zewnętrznych na długość śledzia oceanicznego wyławianego w Europie. Dane dotyczą
+  okresu 60-ciu lat i zebrane zostały podczas komercyjnych połowów. Wynika z nich,
+  że długość śledzia oceanicznego wyławianego w Europie uległa zmniejszeniu. W niniejszym
+  raporcie wykazano, że największy wpływ na zaistniałą sytuację ma wzrastająca temperatura
+  przy powierzchni wody, która wpisuje się w szeroko dyskutowany problem ocieplania
+  się ziemskiego klimatu.
+  
+---
+
+
+##Cel projektu
+
+Celem projektu jest wykonanie zadań z zakresu eksploracji zbioru danych, zawierającego informacje związane z zmiennymi środowiskowymi potencjalnie wpływającymi na długość śledzia oceanicznego. Do każdego rozwiązania należy dołączyć opis wykonywanych czynności, które prowadziły do wykonania zadania. Głownym zadaniem jest odpowiedź na pytanie, który z czynników środowiskowych ma największy wpływ na długość śledzia oceanicznego.
+
+##Wykorzystane biblioteki.
+
+```{r Libraries, echo=TRUE, message=FALSE, cache=TRUE}
+library(reshape2)
+library(dplyr)
+library(caret)
+library(clusterSim)
+library(corrplot)
+library(plotly)
+```
+
+##Kod zapewniający powtarzalność wyników przy każdym uruchomieniu raportu na tych samych danych.
+
+```{r SeedSettings, echo=TRUE, message=FALSE, cache=TRUE}
+set.seed(879)
+```
+
+##Wczytywanie danych z pliku.
+
+```{r ReadFile, echo=TRUE, message=FALSE, cache=TRUE}
+table <- read.csv("/Users/jachnika/Desktop/Raport/data.csv")
+```
+
+##Usunięcie brakujących danych
+
+W celu usunięcia brakujących wartości, zamieniono znak '?' na wartość NA, przekonwertowano dane do typu numerycznego, a następnie usunięto ze zbioru wiersze, które zawierały brakujące wartości.
+
+```{r MatrixToDataFrame, echo=TRUE, message=FALSE, cache=TRUE}
+rowData <- as.data.frame(table[,-c(1)]) 
+idx <- rowData == '?'
+is.na(rowData) <- idx
+
+toNumericValues = 
+  function(x) {
+    for(i in names(x)){
+      x[[i]] <- as.numeric(as.character(x[[i]]))
+    }
+    return(x)
+  }
+
+rowData <- toNumericValues(rowData)
+df <- rowData[complete.cases(rowData[colnames(rowData)]), colnames(rowData)]
+```
+
+##Podsumowanie rozmiaru zbioru i podstawowe statystyki.
+
+Poniżej przedstawiono podsumowanie zbioru przed i po normalizacji danych. Dane znormalizowano [type n12 -> ((x-mean)/sqrt(sum((x-mean)^2)))] przy użyciu metody data.Normalization z biblioteki clusterSim.
+
+###Podsumowanie wartości przed normalizacją
+
+```{r DataSummaryBeforeNormalization, echo=TRUE, message=FALSE, cache=FALSE}
+summary(df)
+```
+
+###Normalizacja
+```{r Normalization, echo=TRUE, message=FALSE, cache=TRUE}
+normalize <- function(data, except){
+  for(i in names(data)){
+    if(!is.element(i, except)){
+      data[[i]] <- data.Normalization(data[[i]], type = "n12") 
+    }
+  }
+  return (data)
+}
+df <- normalize(df, c("length"))
+```
+
+###Podsumowanie wartości po normalizacji
+
+```{r DataSummaryAfterNormalization, echo=TRUE, message=FALSE, cache=FALSE}
+summary(df)
+```
+
+
+##Szczegółowa analiza wartości atrybutów.
+
+Po przeanalizowaniu danych nie zdecydowano się na usunięcie wartości odstających. Poniżej zamieszczone histogramy wskazują, że wszystkie atrybuty w przybliżeniu mają rozkład normalny.
+
+###Histogramy atrybutów
+
+```{r Histograms, echo=TRUE, message=FALSE, cache=TRUE, fig.height=20}
+createHistograms <- function(data){
+  meltedData = melt(data)
+  ggplot(data=meltedData) +
+    geom_histogram(bins = 30, col="red", aes(x = value, y = ..count..)) +
+    facet_wrap(~variable, ncol = 2 ) +
+    theme_bw()
+}
+createHistograms(df[,2:ncol(df)])
+```
+
+###Histogram atrybutu decyzyjnego
+```{r Histogram, echo=TRUE, message=FALSE, cache=TRUE, fig.height=5}
+ggplot(data=df, aes(df$length)) +
+    geom_histogram(bins = 30, col="red") +
+    theme_bw()
+```
+
+##Sprawdzenie korelacji między zmiennymi.
+
+W celu znalezienia skorelowanych atrybutów zdecydowano się obliczyć korelację pomiędzy atrybutami, a także zwizualizować ją przy pomocy biblioteki Corrplot. Parametr odcięcia został ustawiony na 0.5.
+
+```{r CorrelationPlot, echo=TRUE, message=FALSE, cache=TRUE, fig.height=5}
+correlation <- cor(df[,-c(1)])
+corrIdx <- findCorrelation(correlation, cutoff = .50, verbose = FALSE)
+df <- df[,-(corrIdx + 1)]
+corrplot(correlation, method="circle", type = "upper")
+```
+
+##Interaktywna wizualizacja długości śledzia w czasie z zaznaczonym trendem
+
+Aby odpowiednio zwizualizować zmianę długości śledzia oceanicznego w czasie, zdecydowano się dodać do zbioru atrybut, reprezentujący poglądowy rok pomiaru ( na bazie liczby pomiarów, miesięcy oraz informacji, że dane pochodzą z okresu 60 lat), a następnie użyć nowego atrybutu jako klasy tak, aby stworzyć próbkę danych o zachowanych proporcjach w czasie. Następnie, stworzono wykres z linią regresji liniowej, a także kolejny przedstawiający krzywą regresji wielomianowej.
+
+###Przygotowanie próbki danych.
+
+```{r DataPreparationForLenghtInTimeVisualization, echo=TRUE, message=FALSE, cache=TRUE, fig.height=5}
+require(caret)
+addYear <- function(data){
+  data$year <- floor(as.numeric(as.character(data$X)) / 880) + 1
+  return (data)
+}
+
+tmp <- df
+idx <- 1
+for(i in 1:nrow(tmp)){
+  tmp[i,"X"] <- idx
+  idx = idx + 1
+}
+tmp <- addYear(tmp)
+idxs <- createDataPartition(tmp$year, p = .95, list = FALSE)
+sampleData <- tmp[-idxs,]
+```
+
+###Zmiana rozmiaru śledzi w czasie - regresja liniowa.
+
+```{r ChangeOfLengthInTimeLinearRegression, echo=TRUE, message=FALSE, cache=FALSE, fig.height=5}
+require(plotly)
+p <- ggplot(data = sampleData, aes(x = X, y = length)) +
+geom_point(size = 1) +
+stat_smooth(method = "lm")
+(gg <- ggplotly(p))
+```
+
+###Zmiana rozmiaru śledzi w czasie - lokalna regresja wielomianowa.
+
+```{r ChangeOfLengthInTimeLinearRegressionTBasedApproximation, echo=TRUE, message=FALSE, cache=FALSE, fig.height=5}
+require(plotly)
+p <- ggplot(data = sampleData, aes(x = X, y = length)) +
+geom_point(size = 1) +
+stat_smooth(method = "loess")
+(gg <- ggplotly(p))
+summary(p)
+```
+
+##Regresor przewidujący rozmiar śledzia.
+
+Zecydowano użyć się kilku typów algorytmów tworzących regresor tak, aby z jednej strony zmaksymalizować wartość raportu dzięki lepszym wynikom, z drugiej strony sprawdzić działanie różnego rodzaju algorytmów i stopień trudności ich implementacji, a także walidacji wyników. Metody użyte w raporcie: linear regression (lm), generalized additive model using LOESS (gamLoess), stochastic gradient boosting (gbm), support vector machines with polynomial kernel (svmPoly), random forest (RF), bagged CART (TreeBag), boosted smoothing spline (bstSm). Podjęto również próby wykorzystania sieci neuronowej, natomiast ze względu na problem z przetwarzaniem wielowątkowym nie udało zbudować się sieci. Poniżej zamieszczono zestawienie miar Rsquared i RMSE, a także walidację modelu względem zbioru testowego i walidacyjnego. W celu przeprowadzenia walidacji z użyciem macierzy pomyłek, zdecydowano się zaokrąglić wartości opisujące długość śledzia, używając wzoru round(x/0.5)*0.5.
+
+###Przygotowanie zbioru testowego i treningowego.
+
+```{r CreatingTrainingAndTestSets, echo=TRUE, message=FALSE, cache=FALSE, fig.height=5}
+require(caret)
+set.seed(879)
+df$length <- round(df$length/0.5)*0.5
+inSample <- createDataPartition(df$length, p = .7, list = FALSE)
+sampleSet <- df[-inSample,]
+inTesting <- createDataPartition(sampleSet$length, p = .6, list = FALSE)
+testing <- sampleSet[inTesting,]
+training <- sampleSet[-inTesting,]
+validate <- df[inSample,]
+
+
+
+trainX <- training[, -c(1,9)]
+trainY <- training$length
+testX <- testing[, -c(1,9)]
+testY <- testing$length
+
+rctrl <- trainControl(method = "repeatedcv", number = 5, repeats = 5, classProbs = TRUE)
+```
+
+###Regresja - tworzenie i porównanie różnych modeli
+
+```{r ModelsComparision, echo=TRUE, message=FALSE, warning=FALSE, cache=TRUE, fig.height=5}
+require(caret)
+set.seed(879)
+
+fitLM <- train(trainX, trainY, trControl = rctrl, method = "lm", metric = "Rsquared")
+fitGamLoess <- train(trainX, trainY, trControl = rctrl, method = "gamLoess", metric = "Rsquared")
+fitGbm <- train(trainX, trainY, trControl = rctrl, method = "gbm", metric = "Rsquared")
+fitSvmPoly <- train(trainX, trainY, trControl = rctrl, method = "svmPoly", metric = "Rsquared")
+fitRF <- train(trainX, trainY, trControl = rctrl, method = "rf", metric = "Rsquared")
+fitTreeBag<- train(trainX, trainY, trControl = rctrl, method = "treebag", metric = "Rsquared")
+fitBstSm<- train(trainX, trainY, trControl = rctrl, method = "bstSm", metric = "Rsquared")
+
+fitGbm$
+
+results <- resamples(list(
+    LM=fitLM, 
+    LOESS=fitGamLoess, 
+    GBM=fitGbm, 
+    SvmPoly=fitSvmPoly, 
+    RF=fitRF, 
+    TreeBag = fitTreeBag,
+    FitBstSm = fitBstSm
+))
+
+summary(results)
+bwplot(results)
+dotplot(results)
+
+predictedGBM <- predict(fitGbm, trainX)
+predictedRF <- predict(fitRF, trainX)
+predictedTreeBag <- predict(fitTreeBag, trainX)
+
+cmGBMTrain <- confusionMatrix(round(predictedGBM/0.5)*0.5, trainY)
+cmRFTrain <- confusionMatrix(round(predictedRF/0.5)*0.5, trainY)
+cmTreeBagTrain <- confusionMatrix(round(predictedTreeBag/0.5)*0.5, trainY)
+
+predictedGBM <- predict(fitGbm, testX)
+predictedRF <- predict(fitRF, testX)
+predictedTreeBag <- predict(fitTreeBag, testX)
+
+cmGBMTest <- confusionMatrix(round(predictedGBM/0.5)*0.5, testY)
+cmRFTest <- confusionMatrix(round(predictedRF/0.5)*0.5, testY)
+cmTreeBagTest <- confusionMatrix(round(predictedTreeBag/0.5)*0.5, testY)
+
+predictedGBM <- predict(fitGbm, validate[-c(1)])
+predictedRF <- predict(fitRF, validate[-c(1)])
+predictedTreeBag <- predict(fitTreeBag, validate[-c(1)])
+
+cmGBMValidate <- confusionMatrix(round(predictedGBM/0.5)*0.5, validate$length)
+cmRFValidate <- confusionMatrix(round(predictedRF/0.5)*0.5, validate$length)
+cmTBValidate <- confusionMatrix(round(predictedTreeBag/0.5)*0.5, validate$length)
+```
+###Miary oceny algorytmu GBM na zbiorze uczącym
+```{r cmGBMTrain, echo=TRUE, message=FALSE, warning=FALSE, cache=FALSE, fig.height=5}
+cmGBMTrain$overall
+```
+
+###Miary oceny algorytmu GBM na zbiorze testowym
+```{r cmGBMTest, echo=TRUE, message=FALSE, warning=FALSE, cache=FALSE, fig.height=5}
+cmGBMTest$overall
+```
+
+###Miary oceny algorytmu GBM na zbiorze validacyjnym
+```{r cmGBMValidate, echo=TRUE, message=FALSE, warning=FALSE, cache=FALSE, fig.height=5}
+cmGBMValidate$overall 
+```
+
+###Miary oceny algorytmu Random Forest na zbiorze uczącym
+```{r cmRFTrain, echo=TRUE, message=FALSE, warning=FALSE, cache=FALSE, fig.height=5}
+cmRFTrain$overall 
+```
+
+###Miary oceny algorytmu Random Forest na zbiorze testowym
+```{r cmRFTest, echo=TRUE, message=FALSE, warning=FALSE, cache=FALSE, fig.height=5}
+cmRFTest$overall 
+```
+
+###Miary oceny algorytmu Random Forest na zbiorze validacyjnym
+```{r cmRFValidate, echo=TRUE, message=FALSE, warning=FALSE, cache=FALSE, fig.height=5}
+cmRFValidate$overall 
+```
+
+###Miary oceny algorytmu Tree Bag na zbiorze uczącym
+```{r cmTreeBagTrain, echo=TRUE, message=FALSE, warning=FALSE, cache=FALSE, fig.height=5}
+cmTreeBagTrain$overall 
+```
+
+###Miary oceny algorytmu Tree Bag na zbiorze testowym
+```{r cmTreeBagTest, echo=TRUE, message=FALSE, warning=FALSE, cache=FALSE, fig.height=5}
+cmTreeBagTest$overall
+```
+
+###Miary oceny algorytmu Tree Bag na zbiorze validacyjnym
+```{r cmTBValidate, echo=TRUE, message=FALSE, warning=FALSE, cache=FALSE, fig.height=5}
+cmTBValidate$overall
+```
+
+##Analiza ważności atrybutów najlepszego znalezionego modelu regresji.
+
+Na podstawie stworzonego modelu można stwierdzić, że największy wpływ na długość śledzia oceanicznego ma attrybut SST, czyli temperatura przy powierzchni wody. Wzrost wartości tego atrybutu może wiązać się z globalnym ocepleniem kilmatu. 
+```{r AttributesSummary, echo=TRUE, message=FALSE, warning=FALSE, cache=FALSE, fig.height=5}
+summary(fitGbm)
+
+```
+
+##Wnioski
+
+Najlepsze wyniki regresji uzyskano dzięki wykorzystaniu algorytmów random forest (RF) oraz stochastic gradient boosting (GBM). Osiągnięto miary Rsquered na poziomie 0.5 oraz miary RMSE na poziomie 1.19. Wartość accuracy na zbiorach testowym i walidacyjnym na poziomie 0.16. W przypadku algorytmu GBM można było zauważyć skłonność do przeuczenia modelu, nie zaobserwowano tej wady w przypadku algorytmu RF. 
+Dzięki zbudowanym modelom można odpowiedzieć na pytanie, który z czynników środowiskowych ma największy wpływ na długość śledzia. 
+Na długość śledzia największy wpływ ma temperatura przy powierzchni wody (atrybut SST).
